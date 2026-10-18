@@ -23,6 +23,7 @@ Boundary(
     policy_hooks: list[PolicyHook] | None = None,
     fail_closed_on_hook_error: bool = True,
     token_issuer: TokenIssuer | None = None,
+    rate_limiter: SlidingWindowRateLimiter | None = None,
 )
 ```
 
@@ -42,6 +43,7 @@ Boundary(
 | `policy_hooks` | List of callables `(CallContext) -> str | None` for custom logic. Return a string to deny with that reason, `None` to allow. |
 | `fail_closed_on_hook_error` | If `True` (default), an exception inside a policy hook denies the call. If `False`, the hook is treated as "allow" on error. |
 | `token_issuer` | Optional `toolboundary.tokens.TokenIssuer`. Only needed if you use `check_and_authorize()` / the network enforcement layer. |
+| `rate_limiter` | Optional rate-limiter object exposing `check_and_record` / `current_count` / `reset`. Defaults to the in-memory `SlidingWindowRateLimiter`. Pass `RedisSlidingWindowRateLimiter` from `toolboundary.redis_backend` for multi-replica deployments. |
 
 ### `Boundary.check(...)`
 
@@ -189,6 +191,113 @@ something the agent's reasoning loop has to remember to invoke.
 
 ---
 
+## External Authorization Providers
+
+### `Boundary` provider parameters
+
+| Parameter | Description |
+|---|---|
+| `provider` | An object implementing the `EvidenceProvider` protocol. Optional — omit for local-only enforcement. |
+| `provider_mode` | `ProviderMode.OBSERVE` (log only) or `ProviderMode.ENFORCE` (fail closed on denial/unavailability). Default: `OBSERVE`. |
+| `policy_version` | Optional string identifying the policy version. Passed to the provider via `LocalDecision.policy_version`. |
+
+### `Boundary.authorize_call(...)`
+
+```python
+boundary.authorize_call(
+    *,
+    tool_name: str,
+    operation: str | None = None,
+    access_mode: AccessMode = AccessMode.READ_ONLY,
+    arguments: dict[str, Any],
+    value: float | None = None,
+    record_count: int | None = None,
+    correlation_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    resource: str | None = None,
+    tool_version: str | None = None,
+    schema_hash: str | None = None,
+    manifest_hash: str | None = None,
+    approval_id: str | None = None,
+    approval_state: str | None = None,
+) -> AuthorizationContext
+```
+
+Evaluates locally (via `check()`), freezes the call with a SHA-256
+digest, and optionally consults a provider. Returns an
+`AuthorizationContext` that must be passed to `record_execution()` after
+the tool dispatches.
+
+### `Boundary.record_execution(...)`
+
+```python
+boundary.record_execution(
+    authorization: AuthorizationContext,
+    *,
+    result: Any = None,
+    error: BaseException | None = None,
+    started_at: float,
+    finished_at: float,
+    correlation_id: str | None = None,
+) -> ProviderReceipt | None
+```
+
+Records execution evidence after the tool has been dispatched. Marks the
+authorization as consumed (prevents replay). Returns a `ProviderReceipt`
+if a provider is configured, else `None`.
+
+### `toolboundary.provider.ProviderMode`
+
+| Value | Behavior |
+|---|---|
+| `OBSERVE` | Provider failures or denials are logged but do not block a locally-allowed action. |
+| `ENFORCE` | Provider must explicitly allow the action; failures or denials block execution before dispatch. |
+
+### `toolboundary.provider.EvidenceProvider` (Protocol)
+
+```python
+class EvidenceProvider(Protocol):
+    def authorize(self, call: FrozenToolCall, local: LocalDecision) -> ProviderGrant: ...
+    def record(self, grant: ProviderGrant, execution: ExecutionRecord) -> ProviderReceipt: ...
+```
+
+### Provider Data Models
+
+| Type | Key Fields |
+|---|---|
+| `FrozenToolCall` | `agent_name`, `tool_name`, `operation`, `arguments`, `resource`, `call_digest` |
+| `LocalDecision` | `decision`, `decision_id`, `agent_name`, `tool_name`, `policy_version` |
+| `ProviderGrant` | `allowed`, `provider`, `authorization_id`, `attempt_id`, `reason`, `metadata` |
+| `ExecutionRecord` | `call_digest`, `status`, `started_at`, `finished_at`, `result_digest`, `error_type` |
+| `ProviderReceipt` | `recorded`, `provider`, `evidence_id`, `signature`, `metadata` |
+| `AuthorizationContext` | `local_decision`, `frozen_call`, `provider_grant`, `consumed` |
+
+### Provider Exceptions
+
+| Exception | Raised when |
+|---|---|
+| `ProviderAuthorizationDenied` | Provider explicitly denied the action (enforce mode). Has `.provider`, `.reason`. |
+| `ProviderUnavailable` | Provider cannot be reached (enforce mode). |
+| `AuthorizationConsumed` | A consumed authorization was reused for a second dispatch. |
+
+### `toolboundary.integrations.agentkey.AgentKeyProvider`
+
+The first concrete provider adapter. Maps ToolBoundary's protocol to
+AgentKey's authorization and evidence API.
+
+```python
+from toolboundary.integrations.agentkey import AgentKeyProvider
+
+provider = AgentKeyProvider(
+    client=agentkey_client,     # AgentKey client instance (or mock)
+    session_id="my-session",    # optional, auto-generated if omitted
+)
+```
+
+Without a `client`, runs in standalone demo mode (no network required).
+
+---
+
 ## Network Enforcement
 
 Requires no extra install (`toolboundary.network` and `toolboundary.tokens`
@@ -266,8 +375,34 @@ Run `python -m toolboundary.benchmarks` (see `examples/benchmark.py`) to reprodu
 ### Multi-process deployments
 
 Both `InMemoryTokenStore` (single-use tracking) and the in-memory rate
-limiter are per-process by default. For multi-replica deployments, supply
-a shared backing store (Redis is a natural fit for both — `SETNX` with
-TTL for single-use tracking, `INCR`/`EXPIRE` for rate limiting). This is
-one of the best first open-source contributions to this project — see
-`CONTRIBUTING.md`.
+limiter are per-process by default. For multi-replica deployments, install
+`toolboundary[redis]` and supply the shared backends:
+
+```python
+from toolboundary.redis_backend import RedisSlidingWindowRateLimiter, RedisTokenStore
+
+limiter = RedisSlidingWindowRateLimiter(redis_url="redis://localhost:6379/0")
+store = RedisTokenStore(redis_url="redis://localhost:6379/0")
+
+boundary = Boundary(..., rate_limiter=limiter)
+enforcer = NetworkEnforcer(issuer, routes, token_store=store)
+```
+
+Both classes accept either `redis_url` or an injected `client` (any
+redis-py-compatible client). They fail closed on Redis outages by default
+— see the module docstring in `toolboundary.redis_backend` for why.
+
+---
+
+## `toolboundary.redis_backend` (optional)
+
+Requires `pip install toolboundary[redis]`. Not imported by the core
+package, so the default install stays dependency-free.
+
+| Class | Drop-in for | Notes |
+|---|---|---|
+| `RedisSlidingWindowRateLimiter` | `SlidingWindowRateLimiter` / `Boundary(rate_limiter=...)` | Sorted-set sliding window; Lua-atomic check+record across replicas. |
+| `RedisTokenStore` | `InMemoryTokenStore` / `NetworkEnforcer(token_store=...)` | `SET NX` + TTL for single-use tokens. |
+
+Both take `redis_url=` or `client=`, plus optional `key_prefix=` and
+`fail_closed=` (default `True`).

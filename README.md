@@ -1,11 +1,11 @@
 # ToolBoundary
 
-**Runtime security and policy enforcement for AI agents and LLM tool calls — local-first, provider-neutral, and deployable as a Python library.**
+**Runtime boundary enforcement for AI agents — as a library, not a service.**
 
-[![PyPI](https://img.shields.io/badge/pypi-v1.0.0-blue)](https://pypi.org/project/toolboundary/)
+[![PyPI](https://img.shields.io/badge/pypi-v1.0.2-blue)](https://pypi.org/project/toolboundary/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-86%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-122%20passed-brightgreen)](tests/)
 [![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen)](tests/)
 
 ToolBoundary answers one question, fast and locally, every time your agent tries to call a
@@ -18,17 +18,18 @@ Your policy is plain Python, version-controlled with the rest of your code.
 pip install toolboundary
 ```
 
-## What's new in v1.0.0
+## What's new in v1.0.2
 
-ToolBoundary v1.0.0 introduces a **provider-neutral authorization and evidence layer** for AI-agent tool execution. It keeps ToolBoundary as the local enforcement authority while allowing optional external providers — including [AgentKey](https://agentkey.us/) — to add external authorization, approval, and verifiable evidence.
+ToolBoundary v1.0.2 consolidates the provider-neutral authorization/evidence architecture introduced in v1.0.0 with the ToolBoundary-side AgentKey reference integration and an optional Redis backend for shared rate limiting and token storage, while keeping ToolBoundary as the local enforcement authority.
 
 ### Key additions
 
+- **Optional Redis shared backends** — `RedisSlidingWindowRateLimiter` and `RedisTokenStore` for multi-process and multi-replica deployments, available through `toolboundary[redis]` without changing the in-memory default
 - **`EvidenceProvider` protocol** — a clean interface any external provider can implement to add authorization and execution evidence without coupling to a specific vendor
-- **`authorize_call()` / `record_execution()`** — a centralized orchestration flow that freezes the exact tool call, computes a cryptographic call digest (SHA-256 of canonical JSON), consults an optional provider, and records execution evidence
+- **Provider-aware execution lifecycle** — `authorize_call()` / `record_execution()` freeze the exact tool call, compute the current ToolBoundary call digest, consult an optional provider, and record execution evidence
 - **Observe / Enforce modes** — `ProviderMode.OBSERVE` logs provider decisions without blocking; `ProviderMode.ENFORCE` fails closed on provider denial or unavailability
 - **`evaluate()` method** — returns a structured `LocalDecision` instead of raise-on-deny, enabling richer programmatic integration
-- **Deterministic canonicalization** — equivalent dictionaries (`{"a":1,"b":2}` vs `{"b":2,"a":1}`) always produce identical digests, binding authorization to the exact call
+- **Deterministic call binding** — the current Python implementation uses canonical JSON key ordering to produce stable SHA-256 call digests; future cross-language/native signed evidence will use a standardized canonicalization scheme (RFC 8785 / JCS) rather than relying on Python-specific JSON serialization
 - **Replay prevention** — consumed authorizations cannot be reused for a second dispatch
 - **Post-dispatch resilience** — if a provider fails to record execution evidence, the local record is preserved
 
@@ -38,9 +39,15 @@ ToolBoundary v1.0.0 introduces a **provider-neutral authorization and evidence l
 
 ## Why this exists
 
-AI agents need a runtime security boundary between model-generated intent and real-world tool execution. ToolBoundary is designed to provide that boundary locally, without requiring a web application, database, gateway, or subscription.
+Enterprise AI-governance platforms (agent registries, policy engines, approval
+dashboards) make sense when a large organization has dozens of AI agents built by
+different teams and needs a compliance layer to track all of them. That's real
+infrastructure for a real problem — but it's disproportionate for the much more common
+case: **one developer or a small team building one to a handful of agents**, who just
+need to make sure a tool-calling agent can't do something catastrophic.
 
-For teams that need centralized authorization, approvals, or independently verifiable evidence, the same local boundary can optionally integrate with an external provider. This keeps the standalone library useful on its own while leaving room for centralized security infrastructure when the deployment requires it.
+ToolBoundary is built for that second case. It costs nothing, requires no
+infrastructure, and takes minutes to add to an existing agent.
 
 ## Quickstart
 
@@ -128,7 +135,6 @@ reasoning loop has to remember to call.
 
 Install with the LangChain extra: `pip install toolboundary[langchain]`
 
-<<<<<<< HEAD
 ### 3. CrewAI tools
 
 ```python
@@ -152,22 +158,10 @@ crew = Crew(
     agents=[agent],
     tasks=[task],
 )
-```
 
-This wraps CrewAI `BaseTool` objects and enforces the boundary at the tool execution path. Authorization is checked before the underlying CrewAI tool runs, so denied calls never reach the real tool implementation.
+## External authorization providers (v1.0.2)
 
-Both synchronous and asynchronous CrewAI tool execution paths are supported.
-
-Install with the CrewAI extra: `pip install toolboundary[crewai]`
-
-## External authorization providers (new in v1.0.0)
-=======
-## External authorization & evidence providers
->>>>>>> upstream/main
-
-ToolBoundary can optionally consult an external authorization or evidence provider before dispatching a tool call. The provider adds a second gate and/or evidence layer — it can never weaken a local policy decision.
-
-One example is [AgentKey](https://agentkey.us/), which can provide external authorization and verifiable evidence around agent actions. ToolBoundary does not require AgentKey and remains fully functional in local-only mode.
+ToolBoundary can optionally consult an external authorization provider before dispatching a tool call. The provider adds a second gate — it can never weaken a local policy decision.
 
 ### Without a provider (default — unchanged from v0.1.0)
 
@@ -225,11 +219,39 @@ class MyProvider:
         return ProviderReceipt(recorded=True, provider="my-provider")
 ```
 
-### AgentKey interoperability
+### AgentKey integration
 
-ToolBoundary's provider-neutral interface is designed so an external system such as [AgentKey](https://agentkey.us/) can plug into the same authorization lifecycle without becoming a dependency of the core library. The local ToolBoundary decision remains authoritative: a local deny is final.
+[AgentKey](https://agentkey.us/) is the first external provider reference integration built against ToolBoundary's provider-neutral contract.
 
-The integration boundary is intentionally provider-neutral so other authorization or evidence systems can implement the same contract.
+The ToolBoundary repository contains the **ToolBoundary-side reference integration,
+example, and end-to-end test coverage**. The AgentKey-specific provider implementation
+is maintained on the AgentKey side and plugs into the existing `EvidenceProvider`
+interface.
+
+```python
+from toolboundary import Boundary, ToolPermission, AutonomyLevel, AccessMode, ProviderMode
+from toolboundary.integrations.agentkey import AgentKeyProvider
+
+provider = AgentKeyProvider(client=your_agentkey_client)
+
+boundary = Boundary(
+    agent_name="support-agent",
+    autonomy=AutonomyLevel.AUTONOMOUS,
+    permissions=[ToolPermission("read_ticket", access_mode=AccessMode.READ_ONLY)],
+    provider=provider,
+    provider_mode=ProviderMode.ENFORCE,
+)
+```
+
+Key points:
+
+- **AgentKey is optional.** The core `pip install toolboundary` remains independent.
+- **ToolBoundary remains the local enforcement authority.** A local deny is final.
+- **The provider contract is vendor-neutral.** Other authorization/evidence providers can implement the same interface.
+- **Cross-language canonical evidence is not defined by Python `json.dumps()`.** The native signed-evidence work will use RFC 8785 (JCS) as the canonicalization target.
+- **The reference integration is intentionally small.** It covers pre-dispatch authorization and post-dispatch evidence without moving security authority out of ToolBoundary.
+
+See [`examples/agentkey_integration.py`](examples/agentkey_integration.py) for the ToolBoundary-side example, [`tests/test_agentkey_integration.py`](tests/test_agentkey_integration.py) for the integration coverage, and [`src/toolboundary/redis_backend.py`](src/toolboundary/redis_backend.py) for the optional Redis backends.
 
 ### Authorization flow
 
@@ -277,6 +299,8 @@ boundary = Boundary(
 )
 ```
 
+For native or cross-language verifiable evidence, the canonicalization and signing format must be specified independently of Python's JSON serializer. See the RFC 8785/JCS evidence work planned for the native evidence roadmap.
+
 When a provider is configured, audit events automatically include evidence metadata:
 call digests, provider decisions, authorization IDs, and result digests.
 
@@ -299,15 +323,9 @@ the ALLOW/DENY decision has already been enforced locally before the sink is inv
 - **Framework-agnostic core, framework-specific adapters.** The core `Boundary` has
   zero dependencies. Framework integrations (LangChain today; more welcome via PR) are
   optional extras.
-- **Local authority, optional extension.** External providers can add authorization,
-  approvals, or evidence, but never override local policy. ToolBoundary works identically
-  in local-only mode.
-
-## AI Agent Security Keywords
-
-AI agent security, LLM security, tool-calling security, AI agent guardrails, runtime policy enforcement, agent authorization, least-privilege AI agents, human-in-the-loop approval, verifiable AI action evidence, tool execution security, LangChain security, Python AI security, autonomous agent controls, and application-layer AI security.
-
----
+- **Local authority, optional extension.** External providers add evidence and stricter
+  gates but never override local policy. ToolBoundary works identically with or without
+  a provider configured.
 
 ## Known limitations — please read this
 
@@ -330,8 +348,10 @@ it does *not* do is more important than what it does:
   platforms — ToolBoundary is intentionally not trying to be that.
 - **The in-memory rate limiter is per-process.** If you run multiple replicas of your
   agent, each process has its own rate-limit counters unless you supply a shared
-  backing store (see `Boundary`'s internals / open an issue if you need this — a
-  Redis-backed limiter is a natural community contribution).
+  backend. Install `toolboundary[redis]` and pass
+  `RedisSlidingWindowRateLimiter` / `RedisTokenStore` from
+  `toolboundary.redis_backend` into `Boundary(rate_limiter=...)` and
+  `NetworkEnforcer(token_store=...)`.
 - **Provider evidence is only as trustworthy as the provider.** An SDK-reported result
   does not itself prove that an external side effect occurred — it proves the SDK
   reported it. See the provider documentation for what guarantees each provider makes.
@@ -346,6 +366,7 @@ in addition to ToolBoundary, not instead of it.
 ```bash
 pip install toolboundary                # core, zero dependencies
 pip install toolboundary[langchain]     # + LangChain integration
+pip install toolboundary[redis]         # + shared Redis rate limiter / token store
 ```
 
 ## Contributing
@@ -354,7 +375,6 @@ Issues and PRs are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 Ideas that would make great first contributions:
 - Custom `EvidenceProvider` implementations for popular platforms
-- Redis-backed rate limiter for multi-process deployments
 - CrewAI / AutoGen / LangGraph integrations (mirroring `integrations/langchain.py`)
 - A minimal read-only local dashboard that tails a `JSONLFileSink` log
 

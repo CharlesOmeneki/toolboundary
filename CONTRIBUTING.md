@@ -13,7 +13,7 @@ git clone https://github.com/Jaycubic/toolboundary.git
 cd toolboundary
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e ".[dev,langchain]"
+pip install -e ".[dev,langchain,redis]"
 ```
 
 ## Running tests
@@ -46,7 +46,7 @@ src/toolboundary/
     __init__.py              # public API surface
     boundary.py              # core Boundary decision engine + provider orchestration
     provider.py              # EvidenceProvider protocol + provider-neutral data models
-    evidence.py              # deterministic canonicalization, SHA-256 hashing, call binding
+    evidence.py              # deterministic JSON binding, SHA-256 hashing, call binding (JCS roadmap tracked separately)
     permissions.py           # ToolPermission
     enums.py                 # AutonomyLevel, AccessMode, etc.
     exceptions.py            # BoundaryViolation, ApprovalRequired, ProviderAuthorizationDenied, etc.
@@ -54,15 +54,16 @@ src/toolboundary/
     tokens.py                # AuthorizationToken, TokenIssuer (network enforcement)
     network.py               # NetworkEnforcer proxy (optional, stdlib-only)
     _rate_limiter.py         # internal sliding-window rate limiter
+    redis_backend.py         # optional Redis rate limiter / token store
     decorators.py            # @guarded_tool (provider-aware)
     integrations/
         langchain.py         # LangChain BaseTool wrapping (provider-aware)
-        agentkey.py          # (future) AgentKey provider adapter
+        agentkey.py          # AgentKey provider adapter (optional integration)
 ```
 
 ## Architecture: the provider layer
 
-ToolBoundary v1.0.0 introduced a provider-neutral authorization and evidence
+ToolBoundary v1.0.x introduced a provider-neutral authorization and evidence
 layer. If you're contributing to this area, understand the key design rules:
 
 1. **Local DENY is final.** No provider, adapter, or integration may turn a
@@ -86,22 +87,23 @@ layer. If you're contributing to this area, understand the key design rules:
 6. **No vendor coupling in core.** Provider-specific code belongs under
    `integrations/`, never in `boundary.py`, `provider.py`, or `evidence.py`.
 
+7. **Optional Redis backends.** `redis_backend.py` provides the merged v1.0.2 shared
+   rate-limiter and token-store implementations for multi-process deployments. Redis
+   remains an optional dependency and must not become part of the core package.
+
 ## Good first contributions
 
 These are scoped, valuable, and don't require redesigning anything:
 
 - **Custom `EvidenceProvider` implementations** — implement the protocol for
-  popular authorization platforms. Place under `integrations/` with an optional
-  extra in `pyproject.toml`.
-- **Redis-backed rate limiter / token store** — for multi-process
-  deployments. Implement the same interface as `SlidingWindowRateLimiter`
-  and `InMemoryTokenStore` and submit as an optional extra
-  (`toolboundary[redis]`).
-- **CrewAI / AutoGen / LangGraph integrations** — mirror the structure of
-  `integrations/langchain.py`: wrap the framework's actual tool-execution
-  call site, not just provide a decorator the user has to remember to apply.
-  These should use the same `authorize_call()` / `record_execution()`
-  orchestration as the existing integrations.
+  authorization/evidence platforms not already covered by the repository. Place
+  provider-specific code under `integrations/` with an optional extra in
+  `pyproject.toml`.
+- **Additional framework integrations** — mirror the structure of
+  `integrations/langchain.py` and `integrations/agentkey.py`: wrap the framework's
+  actual tool-execution call site and use the same `authorize_call()` /
+  `record_execution()` orchestration as the existing integrations. CrewAI remains
+  under review in PR #11; AutoGen is tracked in issue #15.
 - **A minimal local dashboard** — a single-file script that tails a
   `JSONLFileSink` log and renders a simple live view. Should have zero
   required dependencies beyond the standard library, in keeping with the
