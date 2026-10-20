@@ -2,7 +2,7 @@
 
 All notable changes to ToolBoundary are documented here.
 
-## [1.0.3] - Unreleased
+## [1.0.3] - 2026-10-20
 
 ### Security
 
