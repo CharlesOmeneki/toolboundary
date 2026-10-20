@@ -1,6 +1,6 @@
 # ToolBoundary
 
-**Runtime boundary enforcement for AI agents — as a library, not a service.**
+**A Python library for AI-agent runtime security, LLM tool-call authorization, and policy enforcement — without a separate service.**
 
 [![PyPI](https://img.shields.io/pypi/v/toolboundary?cacheSeconds=300)](https://pypi.org/project/toolboundary/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -8,11 +8,18 @@
 [![CI](https://github.com/Jaycubic/toolboundary/actions/workflows/ci.yml/badge.svg)](https://github.com/Jaycubic/toolboundary/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/Jaycubic/toolboundary/branch/main/graph/badge.svg)](https://codecov.io/gh/Jaycubic/toolboundary)
 
+ToolBoundary enforces tool permissions, operation allow-lists, rate limits, approval rules,
+emergency stops, audit trails, optional authorization/evidence providers, and token-gated
+HTTP proxying for AI agents and LLM applications.
+
+**Latest release: [v1.0.3](https://github.com/Jaycubic/toolboundary/releases/tag/v1.0.3)** ·
+[Install from PyPI](https://pypi.org/project/toolboundary/)
+
 ToolBoundary answers one question, fast and locally, every time your agent tries to call a
 tool: **"is this exact call allowed, right now?"**
 
-No separate web app. No database to stand up. No dashboard to log into. No subscription.
-Your policy is plain Python, version-controlled with the rest of your code.
+No separate web app or database is required. Your policy is plain Python, version-controlled
+with the rest of your code.
 
 ```bash
 pip install toolboundary
