@@ -157,3 +157,38 @@ def test_guard_tools_wraps_multiple_tools():
 
     assert result == "transferred 500.0 to acct-123"
     assert transfer_tool.executed is True
+
+
+def test_structured_tool_blocks_unauthorized_call():
+    boundary = make_boundary()
+    tool = WireTransferTool()
+
+    guarded = guard_tool(
+        tool,
+        boundary,
+        access_mode=AccessMode.EXECUTE,
+        value_arg="amount",
+    )
+    structured = guarded.to_structured_tool()
+
+    with pytest.raises(BoundaryViolation):
+        structured.invoke({"account_id": "acct-123", "amount": 5000})
+
+    assert tool.executed is False
+
+
+def test_positional_arguments_are_checked_against_value_limit():
+    boundary = make_boundary()
+    tool = WireTransferTool()
+
+    guarded = guard_tool(
+        tool,
+        boundary,
+        access_mode=AccessMode.EXECUTE,
+        value_arg="amount",
+    )
+
+    with pytest.raises(BoundaryViolation):
+        guarded._run("acct-123", 5000)
+
+    assert tool.executed is False

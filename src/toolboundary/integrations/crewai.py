@@ -1,18 +1,19 @@
 """
 CrewAI integration for ToolBoundary.
 
-The integration wraps a CrewAI BaseTool and enforces the ToolBoundary
+The integration wraps a CrewAI BaseTool and enforces ToolBoundary
 authorization immediately before CrewAI executes the underlying tool.
 """
 
 from __future__ import annotations
 
+import inspect
 import time
 from typing import Any
 
 try:
     from crewai.tools import BaseTool
-except ImportError as exc:  # pragma: no cover - depends on optional dependency
+except ImportError as exc:  # pragma: no cover - optional dependency
     raise ImportError(
         "CrewAI integration requires CrewAI. "
         "Install it with `pip install toolboundary[crewai]`."
@@ -50,34 +51,50 @@ def guard_tool(
         max_usage_count: int | None = tool.max_usage_count
         tool_failure_policy: Any = tool.tool_failure_policy
 
-        def _evaluate(self, kwargs: dict[str, Any]) -> None:
-            resolved_value = kwargs.get(value_arg) if value_arg else None
-            resolved_records = (
-                kwargs.get(record_count_arg) if record_count_arg else None
-            )
+        def _arguments(
+            self, args: tuple[Any, ...], kwargs: dict[str, Any]
+        ) -> dict[str, Any]:
+            """Normalize positional and keyword arguments for policy checks."""
+            signature = inspect.signature(tool._run)
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
 
+            arguments = dict(bound.arguments)
+
+            # Expand **kwargs if the original tool accepts them.
+            for name, parameter in signature.parameters.items():
+                if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                    extra = arguments.pop(name, {})
+                    arguments.update(extra)
+
+            return arguments
+
+        def _evaluate(self, arguments: dict[str, Any]) -> None:
             boundary.check(
                 resolved_name,
                 operation=operation,
                 access_mode=access_mode,
-                value=resolved_value,
-                record_count=resolved_records,
+                value=arguments.get(value_arg) if value_arg else None,
+                record_count=(
+                    arguments.get(record_count_arg)
+                    if record_count_arg
+                    else None
+                ),
                 metadata={"crewai_tool": tool.name},
             )
 
-        def _authorize(self, kwargs: dict[str, Any]) -> Any:
-            resolved_value = kwargs.get(value_arg) if value_arg else None
-            resolved_records = (
-                kwargs.get(record_count_arg) if record_count_arg else None
-            )
-
+        def _authorize(self, arguments: dict[str, Any]) -> Any:
             return boundary.authorize_call(
                 tool_name=resolved_name,
                 operation=operation,
                 access_mode=access_mode,
-                arguments=dict(kwargs),
-                value=resolved_value,
-                record_count=resolved_records,
+                arguments=arguments,
+                value=arguments.get(value_arg) if value_arg else None,
+                record_count=(
+                    arguments.get(record_count_arg)
+                    if record_count_arg
+                    else None
+                ),
                 metadata={"crewai_tool": tool.name},
                 resource=resource,
                 tool_version=tool_version,
@@ -86,68 +103,60 @@ def guard_tool(
             )
 
         def _run(self, *args: Any, **kwargs: Any) -> Any:
-            """Delegate execution to the original CrewAI tool."""
-            return tool._run(*args, **kwargs)  # noqa: SLF001
+            """Authorize the actual synchronous execution path."""
+            arguments = self._arguments(args, kwargs)
+
+            if boundary._provider is None:  # noqa: SLF001
+                self._evaluate(arguments)
+                return tool._run(*args, **kwargs)  # noqa: SLF001
+
+            authorization = self._authorize(arguments)
+            started_at = time.time()
+            error: BaseException | None = None
+            result: Any = None
+
+            try:
+                result = tool._run(*args, **kwargs)  # noqa: SLF001
+                return result
+            except BaseException as exc:
+                error = exc
+                raise
+            finally:
+                boundary.record_execution(
+                    authorization,
+                    result=result,
+                    error=error,
+                    started_at=started_at,
+                    finished_at=time.time(),
+                )
 
         async def _arun(self, *args: Any, **kwargs: Any) -> Any:
-            """Delegate async execution to the original CrewAI tool."""
-            return await tool._arun(*args, **kwargs)  # noqa: SLF001
+            """Authorize the actual asynchronous execution path."""
+            arguments = self._arguments(args, kwargs)
 
-        def run(self, *args: Any, **kwargs: Any) -> Any:
-            """Authorize immediately before executing the wrapped tool."""
-            if boundary._provider is not None:  # noqa: SLF001
-                authorization = self._authorize(kwargs)
-                started_at = time.time()
-                error: BaseException | None = None
-                result: Any = None
+            if boundary._provider is None:  # noqa: SLF001
+                self._evaluate(arguments)
+                return await tool._arun(*args, **kwargs)  # noqa: SLF001
 
-                try:
-                    result = tool.run(*args, **kwargs)
-                except BaseException as exc:
-                    error = exc
-                    raise
-                finally:
-                    finished_at = time.time()
-                    boundary.record_execution(
-                        authorization,
-                        result=result,
-                        error=error,
-                        started_at=started_at,
-                        finished_at=finished_at,
-                    )
+            authorization = self._authorize(arguments)
+            started_at = time.time()
+            error: BaseException | None = None
+            result: Any = None
 
+            try:
+                result = await tool._arun(*args, **kwargs)  # noqa: SLF001
                 return result
-
-            self._evaluate(kwargs)
-            return tool.run(*args, **kwargs)
-
-        async def arun(self, *args: Any, **kwargs: Any) -> Any:
-            """Authorize immediately before async execution."""
-            if boundary._provider is not None:  # noqa: SLF001
-                authorization = self._authorize(kwargs)
-                started_at = time.time()
-                error: BaseException | None = None
-                result: Any = None
-
-                try:
-                    result = await tool.arun(*args, **kwargs)
-                except BaseException as exc:
-                    error = exc
-                    raise
-                finally:
-                    finished_at = time.time()
-                    boundary.record_execution(
-                        authorization,
-                        result=result,
-                        error=error,
-                        started_at=started_at,
-                        finished_at=finished_at,
-                    )
-
-                return result
-
-            self._evaluate(kwargs)
-            return await tool.arun(*args, **kwargs)
+            except BaseException as exc:
+                error = exc
+                raise
+            finally:
+                boundary.record_execution(
+                    authorization,
+                    result=result,
+                    error=error,
+                    started_at=started_at,
+                    finished_at=time.time(),
+                )
 
     return _GuardedTool()
 

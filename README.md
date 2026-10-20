@@ -159,6 +159,8 @@ crew = Crew(
     tasks=[task],
 )
 
+```
+
 ## External authorization providers (v1.0.2)
 
 ToolBoundary can optionally consult an external authorization provider before dispatching a tool call. The provider adds a second gate — it can never weaken a local policy decision.
