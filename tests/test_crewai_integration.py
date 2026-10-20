@@ -11,6 +11,7 @@ from toolboundary import (
     ToolPermission,
 )
 from toolboundary.integrations.crewai import guard_tool, guard_tools
+from toolboundary.provider import ProviderGrant, ProviderMode, ProviderReceipt
 
 
 class ReadDBTool(BaseTool):
@@ -50,6 +51,31 @@ class AsyncTool(BaseTool):
         return f"async:{value}"
 
 
+class SpyCrewAIProvider:
+    """Provider that records authorization and execution calls for testing."""
+
+    def __init__(self):
+        self.authorize_calls = []
+        self.record_calls = []
+
+    def authorize(self, call, local):
+        self.authorize_calls.append((call, local))
+        return ProviderGrant(
+            allowed=True,
+            provider="spy",
+            authorization_id="spy-auth",
+            attempt_id="spy-att",
+        )
+
+    def record(self, grant, execution):
+        self.record_calls.append((grant, execution))
+        return ProviderReceipt(
+            recorded=True,
+            provider="spy",
+            evidence_id="spy-ev",
+        )
+
+
 def make_boundary() -> Boundary:
     return Boundary(
         agent_name="crewai-test-agent",
@@ -68,7 +94,7 @@ def make_boundary() -> Boundary:
                 tool_name="async_tool",
                 access_mode=AccessMode.READ_ONLY,
             ),
-        ]
+        ],
     )
 
 
@@ -192,3 +218,37 @@ def test_positional_arguments_are_checked_against_value_limit():
         guarded._run("acct-123", 5000)
 
     assert tool.executed is False
+
+
+def test_provider_authorizes_and_records_crew_execution():
+    provider = SpyCrewAIProvider()
+    boundary = Boundary(
+        agent_name="crewai-test-agent",
+        autonomy=AutonomyLevel.AUTONOMOUS,
+        permissions=[
+            ToolPermission(
+                tool_name="read_db",
+                access_mode=AccessMode.READ_ONLY,
+            ),
+        ],
+        provider=provider,
+        provider_mode=ProviderMode.ENFORCE,
+    )
+    tool = ReadDBTool()
+    guarded = guard_tool(tool, boundary)
+
+    result = guarded.run(query="SELECT 1")
+
+    assert result == "results for: SELECT 1"
+    assert tool.executed is True
+
+    assert len(provider.authorize_calls) == 1
+    frozen_call, local_decision = provider.authorize_calls[0]
+    assert frozen_call.tool_name == "read_db"
+    assert frozen_call.arguments == {"query": "SELECT 1"}
+    assert local_decision.decision == "ALLOW"
+
+    assert len(provider.record_calls) == 1
+    _, execution = provider.record_calls[0]
+    assert execution.status == "success"
+    assert execution.result_digest is not None
