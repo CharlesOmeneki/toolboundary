@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+
+pytest.importorskip("crewai")
 from crewai.tools import BaseTool
 
 from toolboundary import (
